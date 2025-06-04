@@ -1,7 +1,7 @@
 from dotenv import load_dotenv
 import os
 
-from fastapi import HTTPException
+from fastapi import HTTPException, status
 from fastapi import FastAPI, Request
 from fastapi.responses import StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
@@ -12,6 +12,7 @@ import asyncio
 import tempfile
 import json
 from typing import Dict, Any
+from io import BytesIO
 #import base64
 
 load_dotenv()
@@ -62,7 +63,7 @@ class Message(BaseModel):
 
 class AudioResponse(BaseModel):
     text: str
-    response: str
+    taille: str
 
 class ChatRequest(BaseModel):
     messages: list[dict[str, str]]
@@ -164,6 +165,8 @@ async def save_audio_to_temp(audio_data: bytes) -> str:
             return temp_file.name
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Erreur lors de la sauvegarde du fichier audio: {str(e)}")
+    
+#####################################################
 
 async def transcribe_audio(file_path: str) -> str:
     """Transcrit l'audio en utilisant Azure OpenAI Whisper."""
@@ -171,7 +174,6 @@ async def transcribe_audio(file_path: str) -> str:
         with open(file_path, 'rb') as audio_file:
             # Créer un objet file-like avec le nom du fichier
             audio_data = audio_file.read()
-            from io import BytesIO
             audio_bytes = BytesIO(audio_data)
             audio_bytes.name = 'audio.webm'  # Important: donner un nom au fichier
 
@@ -180,61 +182,73 @@ async def transcribe_audio(file_path: str) -> str:
                 model=MODEL_AUDIO_DEPLOYMENT_NAME,
                 language="fr"
             )
-            
-            print("Transcription réussie")  # Debug
+
+            if not hasattr(transcript_response, 'text') or not transcript_response.text:
+                raise ValueError("La réponse de transcription est invalide ou vide")
+        
             return transcript_response.text
+        
     except Exception as e:
         print(f"Erreur de transcription détaillée: {str(e)}")  # Log détaillé
-        raise HTTPException(status_code=500, detail=f"Erreur de transcription: {str(e)}")
-    finally:
-        if os.path.exists(file_path):
-            os.remove(file_path)
-            print(f"Fichier temporaire supprimé: {file_path}")  # Debug
 
-async def get_gpt_response(transcription: str) -> str:
-    """Obtient une réponse de GPT-4."""
-    try:
-        print(f"Envoi à GPT: {transcription}")  # Debug
-        chat_response = client.chat.completions.create(  # Utilisation du client principal au lieu de clientAudio
-            model=MODEL_DEPLOYMENT_NAME,
-            messages=[
-                {
-                    "role": "system", 
-                    "content": "Vous êtes un assistant utile qui répond en français avec un style décontracté mais professionnel."
-                },
-                {"role": "user", "content": transcription}
-            ],
-            temperature=0.7,
-            max_tokens=800,
-            top_p=0.95,
-            frequency_penalty=0,
-            presence_penalty=0,
-            stop=None
-        )
-        print("Réponse GPT reçue avec succès")  # Debug
-        return chat_response.choices[0].message.content
-    except Exception as e:
-        print(f"Erreur GPT détaillée: {str(e)}")  # Log détaillé
-        raise HTTPException(status_code=500, detail=f"Erreur GPT: {str(e)}")
+    # finally:
+    #     if os.path.exists(file_path):
+    #         os.remove(file_path)
+    #         print(f"Fichier temporaire supprimé: {file_path}")  # Debug
+    # finally:
+    #     try:
+    #         if os.path.exists(file_path):
+    #             os.remove(file_path)
+    #             print(f"Fichier temporaire supprimé: {file_path}")
+    #     except Exception as cleanup_error:
+    #         print(f"Erreur lors du nettoyage du fichier: {cleanup_error}")
+
+####################################################
+
+# async def get_gpt_response(transcription: str) -> str:
+#     """Obtient une réponse de GPT-4."""
+#     try:
+#         print(f"Envoi à GPT: {transcription}")  # Debug
+#         chat_response = client.chat.completions.create(  # Utilisation du client principal au lieu de clientAudio
+#             model=MODEL_DEPLOYMENT_NAME,
+#             messages=[
+#                 {
+#                     "role": "system", 
+#                     "content": "Vous êtes un assistant utile qui répond en français avec un style décontracté mais professionnel."
+#                 },
+#                 {"role": "user", "content": transcription}
+#             ],
+#             temperature=0.7,
+#             max_tokens=800,
+#             top_p=0.95,
+#             frequency_penalty=0,
+#             presence_penalty=0,
+#             stop=None
+#         )
+#         print("Réponse GPT reçue avec succès")  # Debug
+#         return chat_response.choices[0].message.content
+#     except Exception as e:
+#         print(f"Erreur GPT détaillée: {str(e)}")  # Log détaillé
+#         raise HTTPException(status_code=500, detail=f"Erreur GPT: {str(e)}")
+    
+#############################################
 
 @app.post("/audio", response_model=AudioResponse)
 async def process_audio(request: Request):
-    """
-    Endpoint pour traiter l'audio :
-    1. Reçoit le fichier audio
-    2. Le transcrit avec Whisper
-    3. Envoie la transcription à GPT-4
-    4. Retourne la transcription et la réponse
-    """
+
     try:
         # Lire les données audio
         audio_data = await request.body()
         
         # Vérifier si les données audio sont vides
         if not audio_data:
-            raise HTTPException(status_code=400, detail="Aucune donnée audio reçue")
+            print("Aucune donnée audio reçue")
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Aucune donnée audio reçue"
+            )
 
-        print("Taille des données audio reçues:", len(audio_data))  # Debug
+        print(f"Taille des données audio reçues: {len(audio_data)} octets")
 
         # Sauvegarder l'audio dans un fichier temporaire
         temp_file_path = await save_audio_to_temp(audio_data)
@@ -246,21 +260,41 @@ async def process_audio(request: Request):
         
         if not transcription:
             raise HTTPException(status_code=422, detail="La transcription a échoué")
+        
+        #return transcription
 
         # Obtenir la réponse de GPT
-        gpt_response = await get_gpt_response(transcription)
-        print("Réponse GPT:", gpt_response)  # Debug
+        #gpt_response = await get_gpt_response(transcription)
+        #print("Réponse GPT:", gpt_response)  # Debug
 
         return AudioResponse(
-            text=transcription,
-            response=gpt_response
+            text = transcription,
+            taille = f"Taille des données audio reçues: {len(audio_data)} octets"
         )
 
     except HTTPException as he:
+        print(f"Erreur HTTP: {he.detail}")
         raise he
+        
     except Exception as e:
-        print(f"Erreur inattendue détaillée: {str(e)}")  # Log détaillé
-        raise HTTPException(status_code=500, detail=str(e))
+        print(f"Erreur inattendue: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Une erreur interne est survenue lors du traitement audio"
+        )
+    
+    finally:
+        # Nettoyage des fichiers temporaires même en cas d'erreur
+        if temp_file_path and os.path.exists(temp_file_path):
+            try:
+                os.remove(temp_file_path)
+                print(f"Fichier temporaire supprimé: {temp_file_path}")
+            except Exception as cleanup_error:
+                print(
+                    f"Échec de suppression du fichier temporaire: {cleanup_error}"
+                )
+    
+##########################################
 
 @app.get("/health")
 async def health_check():
@@ -276,9 +310,9 @@ async def health_check():
         "audio_model_deployment": MODEL_AUDIO_DEPLOYMENT_NAME
     }
 
-if __name__ == "__main__":
-    import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8000) 
+# if __name__ == "__main__":
+#     import uvicorn
+#     uvicorn.run(app, host="0.0.0.0", port=8000) 
 
 
 
